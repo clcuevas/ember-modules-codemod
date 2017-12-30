@@ -67,6 +67,14 @@ function transform(file, api/*, options*/) {
     // order to reuse custom names for any fields referenced both ways.
     resolveAliasImports(globalAliases, mappings, modules, root);
 
+    // Discover nested destructured aliases which have been broken in multiple statements,
+    // e.g. `const { alias } = computed;`.
+    let globalDestructuredAliases = findUsageOfMultiLevelDestructures(root, globalAliases, mappings);
+
+    // Resolve the discovered nested destructured aliases which have been broken
+    // in multiple statements.
+    resolveAliasImports(globalDestructuredAliases, mappings, modules, root);
+
     // Scan the source code, looking for any instances of the `Ember` identifier
     // used as the root of a property lookup. If they match one of the provided
     // mappings, save it off for replacement later.
@@ -176,15 +184,8 @@ function transform(file, api/*, options*/) {
 
   // Find destructured global aliases for fields on the Ember global
   function findGlobalEmberAliases(root, globalEmber, mappings) {
-    let aliases = {};
     let assignments = findUsageOfDestructuredEmber(root, globalEmber);
-    for (let assignment of assignments) {
-      let emberPath = joinEmberPath(assignment.get('init'), globalEmber);
-      for (let alias of extractAliases(mappings, assignment.get('id'), emberPath)) {
-        aliases[alias.identifier.node.name] = alias;
-      }
-    }
-    return aliases;
+    return buildAliases(mappings, assignments, globalEmber);
   }
 
   function findUsageOfDestructuredEmber(root, globalEmber) {
@@ -197,6 +198,40 @@ function transform(file, api/*, options*/) {
     });
 
     return uses.paths();
+  }
+
+  function findUsageOfMultiLevelDestructures(root, globalAliases, mappings) {
+    let usages = [];
+
+    for (let alias of Object.keys(globalAliases)) {
+      let usage = findUsageOfDestructuredEmber(root, alias);
+      if (usage.length !== 0) {
+        usages.push({ alias, usage: usage[0] });
+      }
+    }
+
+    return buildAliases(mappings, usages);
+  }
+
+  function buildAliases(mappings, assignments, globalEmber) {
+    let aliases = {};
+    let emberPath;
+    let extractedAliases;
+
+    for (let assignment of assignments) {
+      let assign = assignment.usage || assignment;
+
+      if (globalEmber) {
+        emberPath = joinEmberPath(assign.get('init'), globalEmber);
+      }
+
+      extractedAliases = extractAliases(mappings, assign.get('id'), assignment.alias || emberPath);
+      for (let alias of extractedAliases) {
+        aliases[alias.identifier.node.name] = alias;
+      }
+    }
+
+    return aliases;
   }
 
   function joinEmberPath(nodePath, globalEmber) {
@@ -347,7 +382,7 @@ function transform(file, api/*, options*/) {
 
     // the namespace like `computed` could be coming from something other than `Ember.computed`
     // so we check the VariableDeclaration within the scope where it is defined and compare that to our
-    // `destructureStatements` to make sure this is really coming from on of those
+    // `destructureStatements` to make sure this is really coming from one of those
     return namespaceUsages.filter((path) => {
       let scope = path.scope.lookup(namespace);
       if (!scope) return false;
